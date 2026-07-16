@@ -265,7 +265,11 @@ class ChannelExtractor:
         logger.info(f"{'─'*50}")
 
         # Click en la categoria del menu lateral
-        self.device.click_text(category_name, wait=wait)
+        self.device.click_text(category_name, wait=wait + 1)
+
+        # Esperar a que carguen los canales en el panel derecho
+        # Verificar que recycler_channel tenga contenido
+        self._wait_for_channels(timeout=10)
 
         # Recopilar canales con scroll
         all_channels = []
@@ -300,12 +304,32 @@ class ChannelExtractor:
                 no_new_count = 0
 
             # Scroll hacia abajo en la lista de canales
-            # La lista esta en el panel derecho (x: 302-719)
             self._scroll_channel_list()
             time.sleep(wait)
 
         self.categories[category_name] = all_channels
         return all_channels
+
+    def _wait_for_channels(self, timeout=10):
+        """
+        Espera a que los canales aparezcan en el panel derecho.
+
+        Despues de hacer click en una categoria, puede tardar un momento
+        en cargar la lista de canales.
+        """
+        start = time.time()
+        while time.time() - start < timeout:
+            self.device.refresh()
+            # Buscar tv_live_name en el panel derecho (x > 302)
+            names = self.device.tree.find_id("tv_live_name").all()
+            channel_names = [n for n in names if n.x1 > 302]
+            if channel_names:
+                logger.info(f"  Canales cargados: {len(channel_names)} visibles")
+                return True
+            time.sleep(1)
+
+        logger.warning("  Timeout esperando canales. Puede que la categoria este vacia.")
+        return False
 
     def _scroll_channel_list(self):
         """
@@ -350,6 +374,24 @@ class ChannelExtractor:
             logger.error("Menu lateral vacio. El panel no se abrio correctamente.")
             return {}
 
+        # Si el panel derecho esta en modo busqueda (sin canales),
+        # hacer click en "Lista" primero para activar la vista de canales
+        self.device.refresh()
+        channel_names = [n for n in self.device.tree.find_id("tv_live_name").all() if n.x1 > 302]
+        if not channel_names:
+            logger.info("Panel derecho vacio. Activando primera categoria...")
+            # Buscar "Lista" o la primera categoria disponible
+            first_cat = None
+            for cat in self.menu_items:
+                if cat not in self.SPECIAL_MENU:
+                    first_cat = cat
+                    break
+            if first_cat is None and self.menu_items:
+                first_cat = self.menu_items[0]
+            if first_cat:
+                self.device.click_text(first_cat, wait=2.0)
+                self._wait_for_channels(timeout=10)
+
         # Recorrer cada categoria
         categories_to_scan = self.menu_items[:]
         if skip_special:
@@ -388,15 +430,13 @@ class ChannelExtractor:
 
         Intenta varias estrategias para abrir el panel:
         1. Si ya esta en la vista de canales (program_view visible) → listo
-        2. Si esta en home → ir a VIVO
-        3. Presionar OK para abrir panel
-        4. Si no funciona, presionar MENU
-        5. Si no funciona, presionar OK de nuevo
+        2. Si esta en home → ir a VIVO, luego abrir panel
+        3. Si esta en fullscreen → presionar OK para abrir panel
 
         Returns:
             True si el panel se abrio correctamente.
         """
-        logger.info("Abriendo panel de canales...")
+        logger.info("Verificando panel de canales...")
 
         # Verificar si ya estamos en la vista de canales
         self.device.refresh()
@@ -408,15 +448,13 @@ class ChannelExtractor:
         cats = self.device.tree.get_categories()
         if cats:
             logger.info("En home. Navegando a VIVO...")
-            # Click en VIVO para entrar a la seccion de TV en vivo
             vivo_node = cats.get("VIVO")
             if vivo_node:
                 self.device.click_node(vivo_node, wait=3.0)
             else:
                 self.device.click_text("VIVO", wait=3.0)
 
-        # Ahora estamos en la vista del reproductor (fullscreen o con panel)
-        # Intentar abrir el panel de canales
+        # Ahora intentar abrir el panel
         for attempt in range(max_attempts):
             self.device.refresh()
 
@@ -424,34 +462,30 @@ class ChannelExtractor:
                 logger.info(f"Panel abierto (intento {attempt+1}).")
                 return True
 
-            # Estrategia segun intento
+            logger.info(f"  Intento {attempt+1} de abrir panel...")
+
             if attempt == 0:
-                # Primer intento: presionar OK (suele abrir el panel)
-                logger.info("  Intentando OK...")
+                # Presionar OK (suele abrir/cerrar el panel)
                 self.device.dpad_center()
-                time.sleep(2)
+                time.sleep(2.5)
             elif attempt == 1:
-                # Segundo intento: presionar OK de nuevo
-                logger.info("  Intentando OK de nuevo...")
+                # Presionar OK de nuevo (toggle)
                 self.device.dpad_center()
-                time.sleep(2)
+                time.sleep(2.5)
             elif attempt == 2:
-                # Tercer intento: MENU
-                logger.info("  Intentando MENU...")
-                self.device.menu()
-                time.sleep(2)
-            elif attempt == 3:
-                # Cuarto intento: tap en el centro de la pantalla
-                logger.info("  Intentando tap en centro...")
+                # Tocar la pantalla (tap en el video)
                 self.device.tap(698, 360)
-                time.sleep(2)
+                time.sleep(2.5)
+            elif attempt == 3:
+                # MENU
+                self.device.menu()
+                time.sleep(2.5)
             else:
-                # Ultimo intento: back y reintentar
-                logger.info("  Intentando BACK + OK...")
+                # BACK + reintentar
                 self.device.back()
                 time.sleep(1)
                 self.device.dpad_center()
-                time.sleep(2)
+                time.sleep(2.5)
 
         # Ultimo check
         self.device.refresh()
