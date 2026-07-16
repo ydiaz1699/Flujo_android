@@ -23,6 +23,7 @@ import logging
 from device import Device, DeviceError
 from mgandroid import MGAndroid
 from crawler import Crawler
+from channel_extractor import ChannelExtractor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -102,9 +103,9 @@ def interactive_menu(mg):
         print("-" * 40)
         print("  1. Estado de la app")
         print("  2. Abrir app")
-        print("  3. Categorias")
+        print("  3. Categorias (VOD)")
         print("  4. Ir a categoria...")
-        print("  5. Canales en vivo")
+        print("  5. Canales en vivo (rapido)")
         print("  6. Historial")
         print("  7. Favoritos")
         print("  8. Crawl completo")
@@ -112,6 +113,11 @@ def interactive_menu(mg):
         print("  10. Dump UI (arbol)")
         print("  11. Click por texto...")
         print("  12. Reiniciar app")
+        print("  ─── Extractor de Canales ───")
+        print("  13. Extraer TODOS los canales")
+        print("  14. Extraer una categoria...")
+        print("  15. Extraer favoritos")
+        print("  16. Ver menu lateral TV en vivo")
         print("  0. Salir")
         print("-" * 40)
 
@@ -160,6 +166,48 @@ def interactive_menu(mg):
             elif opt == "12":
                 mg.restart()
                 print("  App reiniciada.")
+
+            # ─── Extractor de Canales ─────────────────────
+            elif opt == "13":
+                extractor = ChannelExtractor(mg)
+                extractor.extract_all()
+                extractor.print_table()
+                extractor.export_csv()
+                extractor.export_json()
+                extractor.export_txt()
+                extractor.summary()
+
+            elif opt == "14":
+                extractor = ChannelExtractor(mg)
+                # Primero mostrar menu lateral
+                mg.go_live(wait=3.0)
+                mg.device.dpad_center()
+                time.sleep(2)
+                extractor.extract_menu()
+                extractor.print_menu()
+                cat = input("  Categoria: ").strip()
+                if cat:
+                    channels = extractor.extract_category(cat)
+                    extractor._consolidate()
+                    extractor.print_table(category=cat)
+                    extractor.export_csv()
+                    print(f"  Exportado a: {extractor.output_dir}")
+
+            elif opt == "15":
+                extractor = ChannelExtractor(mg)
+                channels = extractor.extract_favorites()
+                extractor._consolidate()
+                extractor.print_table(category="Favorito")
+                extractor.export_csv("favoritos.csv")
+
+            elif opt == "16":
+                extractor = ChannelExtractor(mg)
+                mg.go_live(wait=3.0)
+                mg.device.dpad_center()
+                time.sleep(2)
+                extractor.extract_menu()
+                extractor.print_menu()
+
             elif opt == "0":
                 print("  Bye!")
                 break
@@ -193,6 +241,7 @@ Uso como libreria:
     parser.add_argument("--crawl", action="store_true", help="Crawl completo")
     parser.add_argument("--categories", action="store_true", help="Listar categorias")
     parser.add_argument("--channels", type=int, metavar="N", help="Recorrer N canales")
+    parser.add_argument("--extract", action="store_true", help="Extraer TODOS los canales (CSV+JSON)")
     parser.add_argument("--status", action="store_true", help="Estado de la app")
     parser.add_argument("--device", "-s", type=str, help="Serial del dispositivo")
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
@@ -212,6 +261,14 @@ Uso como libreria:
     try:
         if args.crawl:
             cmd_crawl(mg)
+        elif args.extract:
+            extractor = ChannelExtractor(mg)
+            extractor.extract_all()
+            extractor.print_table()
+            extractor.export_csv()
+            extractor.export_json()
+            extractor.export_txt()
+            extractor.summary()
         elif args.categories:
             cmd_categories(mg)
         elif args.channels:
