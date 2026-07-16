@@ -47,22 +47,41 @@ class Device:
     # ─── ADB bajo nivel ───────────────────────────────────────────────
 
     def _adb(self, command, timeout=None):
-        """Ejecuta un comando ADB."""
+        """
+        Ejecuta un comando ADB.
+
+        Compatible con Windows y Linux.
+        Acepta comando como string o lista.
+        """
         cmd = ["adb"]
         if self.serial:
             cmd += ["-s", self.serial]
 
-        if isinstance(command, str):
-            cmd += command.split()
-        else:
+        if isinstance(command, list):
             cmd += command
+        else:
+            # Usar shlex para parsear correctamente (maneja rutas con espacios)
+            import shlex
+            import sys
+            if sys.platform == "win32":
+                # En Windows shlex no maneja bien backslashes,
+                # usamos split simple pero protegemos rutas
+                cmd += command.split()
+            else:
+                cmd += shlex.split(command)
 
         timeout = timeout or self.timeout
         logger.debug(f"$ {' '.join(cmd)}")
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                # En Windows necesitamos shell=False (default) pero
+                # creationflags para evitar ventanas emergentes
+                **self._subprocess_kwargs()
             )
             if result.returncode != 0 and result.stderr.strip():
                 logger.warning(f"stderr: {result.stderr.strip()}")
@@ -70,7 +89,20 @@ class Device:
         except subprocess.TimeoutExpired:
             raise DeviceError(f"Timeout: {' '.join(cmd)}")
         except FileNotFoundError:
-            raise DeviceError("ADB no encontrado en PATH")
+            raise DeviceError(
+                "ADB no encontrado en PATH.\n"
+                "Solucion: agrega la carpeta de platform-tools al PATH:\n"
+                "  set PATH=%PATH%;C:\\Users\\Alex\\Downloads\\platform-tools"
+            )
+
+    @staticmethod
+    def _subprocess_kwargs():
+        """Kwargs extra para subprocess segun el OS."""
+        import sys
+        if sys.platform == "win32":
+            # Evitar que se abra una ventana de CMD por cada comando
+            return {"creationflags": subprocess.CREATE_NO_WINDOW}
+        return {}
 
     def shell(self, command):
         """Ejecuta un comando shell en el dispositivo."""
@@ -127,9 +159,9 @@ class Device:
         name = save_as or f"dump_{self._dump_count:03d}"
         local_path = self._dumps_dir / f"{name}.xml"
 
-        # Dump + pull
+        # Dump + pull (usar lista para pull, evitar problemas con rutas Windows)
         self._adb("shell uiautomator dump /sdcard/ui.xml")
-        self._adb(f"pull /sdcard/ui.xml {local_path}")
+        self._adb(["pull", "/sdcard/ui.xml", str(local_path)])
 
         # Parsear
         self.tree.parse_file(str(local_path))
@@ -329,7 +361,7 @@ class Device:
     def screenshot(self, local_path):
         """Captura de pantalla."""
         self._adb("shell screencap -p /sdcard/tmp_screen.png")
-        self._adb(f"pull /sdcard/tmp_screen.png {local_path}")
+        self._adb(["pull", "/sdcard/tmp_screen.png", str(local_path)])
         self._adb("shell rm /sdcard/tmp_screen.png")
         logger.info(f"Screenshot: {local_path}")
 
@@ -341,8 +373,8 @@ class Device:
 
     def pull(self, remote, local):
         """Descarga archivo del dispositivo."""
-        self._adb(f"pull {remote} {local}")
+        self._adb(["pull", remote, str(local)])
 
     def push(self, local, remote):
         """Sube archivo al dispositivo."""
-        self._adb(f"push {local} {remote}")
+        self._adb(["push", str(local), remote])
