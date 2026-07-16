@@ -1,6 +1,8 @@
-# Dumps y screenshots (se generan localmente)
+# Datos generados localmente
 dumps/session_*
+dumps/dump_*
 screenshots/session_*
+crawl_output/
 
 # Pero mantener las carpetas
 !dumps/.gitkeep

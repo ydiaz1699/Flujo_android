@@ -1,285 +1,362 @@
-# Android TV Bot
+# MGAndroid Driver
 
-Bot de automatizacion para **MGAndroid** en Android TV via ADB.
+Framework de automatizacion para **MGAndroid** en Android TV via ADB.
 
-Navega la interfaz de forma inteligente usando el arbol de UI (`uiautomator dump`) en lugar de coordenadas fijas, lo que lo hace resistente a cambios de resolucion o layout.
+Navega la interfaz de forma inteligente usando el arbol de UI (`uiautomator dump`).  
+**No depende de coordenadas fijas** — busca elementos por texto/ID, sube al contenedor clickeable padre, y calcula el centro automaticamente.
 
-## Estructura del Proyecto
+---
+
+## Arquitectura
 
 ```
-android-tv-bot/
-├── main.py            # Punto de entrada (CLI + menu interactivo)
-├── adb.py             # Wrapper de ADB (tap, key, swipe, apps, etc)
-├── parser.py          # Parser de ui.xml (buscar por texto/id/clase)
-├── navigation.py      # Navegacion inteligente basada en UI
-├── capture.py         # Sesiones de captura (screenshots + dumps)
-├── dumps/             # UI dumps XML (organizados por sesion)
-├── screenshots/       # Capturas de pantalla (organizadas por sesion)
-└── README.md
+mgandroid-driver/
+├── node.py          # Nodo UI con jerarquia padre/hijo
+├── selector.py      # Motor de busqueda (texto, id, clase, atributos)
+├── ui.py            # Parser de ui.xml → arbol de nodos
+├── device.py        # ADB + tap inteligente (busca target clickeable)
+├── app.py           # Ciclo de vida de la app (open, close, wait_ready)
+├── mgandroid.py     # API de alto nivel (go_movies, go_live, etc)
+├── crawler.py       # Recorrido automatico + exportacion
+├── main.py          # CLI + menu interactivo
+├── dumps/           # UI dumps XML
+├── screenshots/     # Capturas de pantalla
+└── crawl_output/    # Resultados de crawls (JSON, CSV, TXT)
 ```
+
+---
+
+## Como Funciona (el nucleo)
+
+En lugar de `tap(666, 690)` con coordenadas hardcodeadas:
+
+```
+1. uiautomator dump → ui.xml
+2. Parsear XML → arbol de UINode con relaciones padre/hijo
+3. Buscar nodo con texto "PELICULA"
+4. El TextView NO es clickeable, pero su contenedor SI
+5. Subir al padre clickeable (find_clickable_parent)
+6. Leer bounds del padre → [569,678][763,702]
+7. Calcular centro → (666, 690)
+8. adb shell input tap 666 690
+```
+
+```python
+# Todo esto sucede internamente con:
+mg.device.click_text("PELÍCULA")
+```
+
+---
 
 ## Requisitos
 
-- **Python 3.7+** (usa dataclasses, f-strings, pathlib)
-- **ADB** (Android Debug Bridge) instalado y en el PATH
+- **Python 3.7+**
+- **ADB** instalado y en PATH
 - Dispositivo Android TV con **depuracion USB/red habilitada**
-- App **MGAndroid** (`com.android.mgandroid`) instalada en el dispositivo
+- App **MGAndroid** (`com.android.mgandroid`) instalada
 
-### Instalar ADB
+---
 
-```bash
-# Ubuntu/Debian
-sudo apt install adb
-
-# macOS (con Homebrew)
-brew install android-platform-tools
-
-# Windows: descargar de https://developer.android.com/tools/releases/platform-tools
-```
-
-## Conexion al Dispositivo
+## Instalacion
 
 ```bash
-# Por red (TV Box)
+# Clonar
+git clone https://github.com/ydiaz1699/Flujo_android.git
+cd Flujo_android
+
+# Conectar dispositivo
 adb connect 192.168.1.XXX:5555
-
-# Verificar conexion
 adb devices
 ```
 
-## Uso
+No tiene dependencias externas (solo stdlib de Python).
 
-### Menu Interactivo (por defecto)
+---
 
-```bash
-python main.py
+## Uso Rapido
+
+### Como libreria (lo mas potente)
+
+```python
+from mgandroid import MGAndroid
+
+mg = MGAndroid()
+mg.open()
+
+# Navegar por categorias
+mg.go_movies()
+mg.go_series()
+mg.go_anime()
+mg.go_live()
+
+# Acciones rapidas
+mg.open_history()
+mg.open_favorites()
+mg.open_settings()
+
+# Canales en vivo
+print(mg.current_channel())
+mg.channel_up()
+mg.channel_down()
+channels = mg.list_channels(count=20)
+
+# Volver al inicio
+mg.back_home()
+
+# Estado completo
+print(mg.status())
 ```
 
-Muestra un menu con opciones:
-1. Info del dispositivo y app
-2. Escanear categorias
-3. Escanear canales en vivo
-4. Escaneo completo
-5. Quick dump (UI actual)
-6. Screenshot
-7. Navegar a categoria
-8. Tap por texto
-9. Abrir/reiniciar app
-
-### Linea de Comandos
+### CLI
 
 ```bash
-# Escaneo completo automatico (categorias + canales)
-python main.py --scan
+# Menu interactivo (por defecto)
+python main.py
 
-# Solo escanear categorias (VIVO, SERIE, PELICULA, ANIME, ESPECIAL)
+# Crawl completo (categorias + canales + capturas)
+python main.py --crawl
+
+# Solo categorias
 python main.py --categories
 
-# Capturar N canales en vivo
+# Recorrer 20 canales
 python main.py --channels 20
 
-# Mostrar info del dispositivo y app
-python main.py --info
+# Estado actual
+python main.py --status
 
-# Quick dump de la pantalla actual
-python main.py --dump
+# Dispositivo especifico
+python main.py --crawl --device 192.168.1.100:5555
 
-# Especificar dispositivo (si hay multiples)
-python main.py --scan --device 192.168.1.100:5555
-
-# Modo verbose (debug)
-python main.py --scan -v
+# Debug verbose
+python main.py --crawl -v
 ```
 
-## Como Funciona
+---
 
-### Enfoque Basado en UI (no coordenadas fijas)
+## Modulos en Detalle
 
-En lugar de hacer `tap(500, 300)` con coordenadas hardcodeadas, el bot:
+### `node.py` — UINode
 
-```
-1. Ejecuta uiautomator dump → obtiene ui.xml
-2. Parsea el XML → encuentra el elemento por texto/id
-3. Lee sus bounds → [x1,y1][x2,y2]
-4. Calcula el centro → (x1+x2)/2, (y1+y2)/2
-5. Hace tap en el centro calculado
-```
-
-Esto significa que si cambia la resolucion, el layout, o las posiciones, **el bot sigue funcionando** sin modificar codigo.
-
-### Ejemplo: Navegar a "PELICULA"
+Cada elemento de la UI es un UINode con:
+- Atributos (text, id, class, clickable, focused, bounds...)
+- Relacion padre/hijo bidireccional
+- `find_clickable_parent()` — sube al primer ancestro clickeable
+- `get_tap_target()` — retorna (nodo_target, (x, y))
+- `center`, `width`, `height`, `area`
+- `tree_str()` — representacion visual del subarbol
 
 ```python
-from adb import ADB
-from navigation import Navigator
-
-adb = ADB()
-nav = Navigator(adb=adb)
-
-# El bot busca "PELICULA" en la UI y calcula donde hacer tap
-nav.go_to_category("PELICULA")
+node = tree.find_text("PELÍCULA").first()
+target, (x, y) = node.get_tap_target()
+# target es el RelativeLayout clickeable padre
+# (x, y) es su centro calculado
 ```
 
-### Ejemplo: Buscar y tocar cualquier texto
+### `selector.py` — Selector
+
+Query builder para buscar nodos:
 
 ```python
-# Busca el texto en pantalla y toca automaticamente
-nav.tap_text("Discovery World HD+")
+# Encadenamiento de filtros
+sel = tree.select()
+result = sel.text("ANIME").clickable().first()
+
+# Busqueda flexible
+sel.by_id("vod_category_name").has_text().all()
+sel.by_class("TextView").in_region(0, 500, 1400, 720).texts()
+sel.clickable().larger_than(5000).sort_by_position()
+
+# Filtro personalizado
+sel.where(lambda n: "HD" in n.text and n.clickable)
 ```
 
-### Ejemplo: Esperar a que aparezca un elemento
+### `ui.py` — UITree
+
+Parser que construye el arbol completo:
 
 ```python
-# Espera hasta 15 segundos a que el texto aparezca
-element = nav.wait_for_text("Cargando...", timeout=15)
+from ui import UITree
+
+tree = UITree()
+tree.parse_file("dumps/home.xml")
+
+# Consultas directas
+tree.get_categories()     # {'VIVO': node, 'SERIE': node, ...}
+tree.get_live_channel()   # "Discovery World HD+"
+tree.get_version()        # "8.7.2"
+tree.get_all_texts()      # ["8.7.2", "15:05", "VIVO", ...]
+
+# Selector
+tree.select().text("SERIE").first()
+tree.find_id("history_btn").first()
+
+# Debug
+tree.summary()
+tree.print_tree(max_depth=3)
 ```
 
-## Uso como Libreria
+### `device.py` — Device
+
+Combina ADB + UITree para tap inteligente:
 
 ```python
-from adb import ADB
-from parser import UIParser
-from navigation import Navigator
-from capture import CaptureSession
+from device import Device
 
-# Inicializar
-adb = ADB(device_serial="192.168.1.100:5555")
-nav = Navigator(adb=adb)
-session = CaptureSession(adb=adb)
+dev = Device(serial="192.168.1.100:5555")
+dev.refresh()  # dump + parse
 
-# Verificar conexion
-assert adb.is_connected()
+# Tap inteligente (busca texto → padre clickeable → centro → tap)
+dev.click_text("PELÍCULA")
+dev.click_id("history_btn")
 
-# Abrir la app
-adb.start_app("com.android.mgandroid")
-adb.sleep(5)
+# Esperas
+dev.wait_for_text("Cargando...", timeout=15)
 
-# Obtener categorias disponibles
-cats = nav.get_categories()
-print(cats)  # {'VIVO': UIElement(...), 'SERIE': ..., ...}
+# Control remoto virtual
+dev.dpad_up()
+dev.dpad_down()
+dev.dpad_center()
+dev.back()
+dev.home()
 
-# Navegar a una categoria
-nav.go_to_category("ANIME")
-
-# Capturar pantalla actual
-session.capture(label="anime_home")
-
-# Ver que canal esta en vivo
-channel = nav.get_current_channel()
-print(f"Canal: {channel}")
-
-# Recorrer todas las categorias con capturas
-session.capture_all_categories(nav)
-
-# Guardar log JSON de la sesion
-session.save_log()
+# Gestos
+dev.scroll_down()
+dev.swipe(100, 300, 900, 300, 500)
 ```
 
-## Modulos
+### `app.py` — App
 
-### `adb.py` - Wrapper ADB
+Gestiona el ciclo de vida de MGAndroid:
+
+```python
+from app import App
+
+app = App(device)
+app.open(wait=5)
+app.wait_ready(timeout=20)
+app.is_on_home()
+app.ensure_home()  # Vuelve a home sin importar donde este
+app.restart()
+app.close()
+```
+
+### `mgandroid.py` — MGAndroid
+
+API semantica de alto nivel:
 
 | Metodo | Descripcion |
 |--------|-------------|
-| `run(cmd)` | Ejecuta comando ADB generico |
-| `is_connected()` | Verifica si hay dispositivo |
-| `tap(x, y)` | Toca coordenadas |
-| `key(keycode)` | Envia keyevent |
-| `swipe(x1,y1,x2,y2)` | Gesto de deslizar |
-| `start_app(pkg)` | Abre aplicacion |
-| `force_stop(pkg)` | Cierra aplicacion |
-| `dump_ui()` | Ejecuta uiautomator dump |
-| `screenshot(path)` | Captura de pantalla |
-| `dpad_up/down/left/right()` | Control remoto virtual |
-| `home()` / `back()` | Botones de navegacion |
+| `mg.open()` | Abre y espera a que cargue |
+| `mg.go_movies()` | Navega a PELICULA |
+| `mg.go_series()` | Navega a SERIE |
+| `mg.go_anime()` | Navega a ANIME |
+| `mg.go_live()` | Navega a VIVO |
+| `mg.go_special()` | Navega a ESPECIAL |
+| `mg.open_history()` | Abre historial |
+| `mg.open_favorites()` | Abre favoritos |
+| `mg.open_settings()` | Abre ajustes |
+| `mg.current_channel()` | Canal en vivo actual |
+| `mg.list_channels(20)` | Recorre 20 canales |
+| `mg.search("texto")` | Busca contenido |
+| `mg.play_first_result()` | Reproduce primer item |
+| `mg.back_home()` | Vuelve a pantalla principal |
+| `mg.status()` | Estado completo (dict) |
+| `mg.screenshot(path)` | Captura de pantalla |
+| `mg.dump()` | UI dump |
 
-### `parser.py` - Parser de UI XML
+### `crawler.py` — Crawler
 
-| Metodo | Descripcion |
-|--------|-------------|
-| `parse_file(path)` | Carga y parsea ui.xml |
-| `find_by_text(text)` | Busca por texto visible |
-| `find_by_id(id)` | Busca por resource-id |
-| `find_clickable()` | Elementos clickeables |
-| `find_focused()` | Elemento con foco |
-| `find(**kwargs)` | Busqueda flexible multi-atributo |
-| `get_categories()` | Categorias de MGAndroid |
-| `get_all_texts()` | Todos los textos en pantalla |
-| `summary()` | Resumen visual de la UI |
-| `print_tree()` | Arbol de elementos |
+Recorrido automatico con exportacion:
 
-### `navigation.py` - Navegacion Inteligente
+```python
+from crawler import Crawler
+from mgandroid import MGAndroid
 
-| Metodo | Descripcion |
-|--------|-------------|
-| `refresh_ui()` | Actualiza estado de la UI |
-| `tap_text(text)` | Busca texto y hace tap |
-| `tap_id(id)` | Busca por ID y hace tap |
-| `go_to_category(name)` | Navega a categoria |
-| `iterate_categories()` | Recorre todas las categorias |
-| `wait_for_text(text)` | Espera que aparezca texto |
-| `get_current_channel()` | Canal en vivo actual |
-| `scroll_down/up/left/right()` | Gestos de scroll |
-| `go_home()` | Vuelve al inicio |
-| `is_on_home()` | Verifica si esta en home |
+mg = MGAndroid()
+mg.open()
 
-### `capture.py` - Sesiones de Captura
+crawler = Crawler(mg=mg)
 
-| Metodo | Descripcion |
-|--------|-------------|
-| `capture(label)` | Screenshot + dump con etiqueta |
-| `screenshot(label)` | Solo captura de pantalla |
-| `dump(label)` | Solo UI dump |
-| `capture_all_categories()` | Recorre y captura categorias |
-| `capture_channel_list(n)` | Captura N canales |
-| `save_log()` | Guarda log JSON de sesion |
-| `export_texts()` | Exporta textos encontrados |
+# Crawl completo
+data = crawler.crawl_all(channels_count=15)
 
-## Keycodes Utiles (Android TV)
+# Solo categorias
+crawler.crawl_categories()
 
-| Keycode | Valor | Descripcion |
-|---------|-------|-------------|
-| HOME | 3 | Ir al inicio |
-| BACK | 4 | Retroceder |
-| DPAD_UP | 19 | Arriba |
-| DPAD_DOWN | 20 | Abajo |
-| DPAD_LEFT | 21 | Izquierda |
-| DPAD_RIGHT | 22 | Derecha |
-| DPAD_CENTER | 23 | OK / Enter |
-| ENTER | 66 | Enter |
-| MENU | 82 | Menu |
-| VOLUME_UP | 24 | Subir volumen |
-| VOLUME_DOWN | 25 | Bajar volumen |
-| MUTE | 164 | Silenciar |
-| MEDIA_PLAY_PAUSE | 85 | Play/Pausa |
-| MEDIA_STOP | 86 | Detener |
+# Solo canales
+channels = crawler.crawl_channels(count=30)
+crawler.export_channels_csv(channels)
 
-## Salida
-
-Los archivos se organizan por sesion:
-
-```
-dumps/
-└── session_20260716_150500/
-    ├── 001_home.xml
-    ├── 002_cat_VIVO.xml
-    ├── 003_cat_SERIE.xml
-    ├── ...
-    ├── session_log.json
-    └── texts_report.txt
-
-screenshots/
-└── session_20260716_150500/
-    ├── 001_home.png
-    ├── 002_cat_VIVO.png
-    └── ...
+# Exportar
+crawler.save_report()
+crawler.export_texts()
+crawler.summary()
 ```
 
-## Proximos Pasos
+---
 
-- [ ] Extraer lista completa de canales por categoria
-- [ ] Automatizar reproduccion y validacion de streams
-- [ ] Detectar errores de carga / buffering
-- [ ] Exportar lista de canales a CSV/JSON
-- [ ] Agregar soporte para EPG (guia de programacion)
+## Elementos Conocidos de MGAndroid
+
+| Elemento | resource-id | Notas |
+|----------|-------------|-------|
+| Logo | `iv_logo` | Pantalla principal |
+| Version | `tv_version` | "8.7.2" |
+| Hora | `tv_time` | Reloj |
+| Ajustes | `iv_setting` | Boton (clickable) |
+| Banner | `banner_root` | Carousel principal |
+| Historial | `history_btn` | Boton (clickable) |
+| Favoritos | `fav_btn` | Boton (clickable) |
+| Player | `main_focus_root` | Area de video en vivo |
+| Canal | `tv_live_title` | Nombre del canal actual |
+| Velocidad | `tv_main_speed` | "82Kb/s" |
+| Categorias | `vod_category_name` | VIVO, SERIE, PELICULA... |
+
+---
+
+## Salida del Crawler
+
+```
+crawl_output/
+└── crawl_20260716_150500/
+    ├── dumps/
+    │   ├── 001_home.xml
+    │   ├── 002_cat_VIVO.xml
+    │   ├── 003_cat_SERIE.xml
+    │   └── ...
+    ├── screenshots/
+    │   ├── 001_home.png
+    │   └── ...
+    ├── report.json          # Datos estructurados
+    ├── report.txt           # Resumen legible
+    ├── channels.csv         # Lista de canales
+    └── all_texts.txt        # Textos unicos encontrados
+```
+
+---
+
+## Keycodes Android TV
+
+| Keycode | Valor | Metodo |
+|---------|-------|--------|
+| HOME | 3 | `dev.home()` |
+| BACK | 4 | `dev.back()` |
+| DPAD_UP | 19 | `dev.dpad_up()` |
+| DPAD_DOWN | 20 | `dev.dpad_down()` |
+| DPAD_LEFT | 21 | `dev.dpad_left()` |
+| DPAD_RIGHT | 22 | `dev.dpad_right()` |
+| DPAD_CENTER | 23 | `dev.dpad_center()` |
+| ENTER | 66 | `dev.enter()` |
+| MENU | 82 | `dev.menu()` |
+
+---
+
+## Roadmap
+
+- [ ] Extraer EPG (guia de programacion)
+- [ ] Monitorear streams (detectar buffering/errores)
+- [ ] Exportar lista completa de canales a JSON/CSV
+- [ ] Soporte multi-dispositivo simultaneo
 - [ ] Notificaciones (Telegram/Discord) si un canal falla
+- [ ] Web dashboard para ver estado en tiempo real
+- [ ] Automatizar tests de QoS por canal

@@ -1,31 +1,28 @@
 #!/usr/bin/env python3
 """
-main.py - Punto de entrada del Android TV Bot.
+main.py - CLI y demo del framework mgandroid-driver.
 
-Bot de automatizacion para MGAndroid en Android TV.
-Navega la app, captura pantallas, extrae informacion de la UI.
+Punto de entrada principal. Proporciona:
+- Menu interactivo para controlar MGAndroid.
+- Comandos CLI para automatizacion.
+- Ejemplos de uso del framework.
 
 Uso:
     python main.py                  # Menu interactivo
-    python main.py --scan           # Escaneo completo automatico
-    python main.py --categories     # Recorrer categorias
-    python main.py --channels 20    # Capturar 20 canales en vivo
-    python main.py --info           # Info del dispositivo + app
-    python main.py --dump           # Solo dump UI de la pantalla actual
+    python main.py --crawl          # Crawl completo
+    python main.py --categories     # Solo categorias
+    python main.py --channels 20    # Listar 20 canales
+    python main.py --status         # Estado actual
 """
 
 import argparse
 import sys
 import time
 import logging
-from pathlib import Path
 
-from adb import ADB, ADBError
-from parser import UIParser
-from navigation import Navigator, NavigationError
-from capture import CaptureSession
-
-# ─── Configuracion de logging ─────────────────────────────────────────
+from device import Device, DeviceError
+from mgandroid import MGAndroid
+from crawler import Crawler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,321 +31,200 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─── Constantes ───────────────────────────────────────────────────────
 
-PACKAGE = "com.android.mgandroid"
-PROJECT_DIR = Path(__file__).parent
+def print_header():
+    print("\n" + "=" * 55)
+    print("   MGAndroid Driver - Framework de Automatizacion")
+    print("=" * 55)
 
 
-# ─── Funciones principales ────────────────────────────────────────────
-
-def check_connection(adb):
-    """Verifica conexion ADB y muestra info del dispositivo."""
-    print("\n" + "=" * 60)
-    print("  ANDROID TV BOT - MGAndroid")
-    print("=" * 60)
-
-    if not adb.is_connected():
-        print("\n  [!] No se detecto ningun dispositivo.")
-        print("      Verifica que ADB esta habilitado en el TV box.")
-        print("      Comando: adb connect <IP_DEL_DISPOSITIVO>")
+def check_device(mg):
+    """Verifica conexion al dispositivo."""
+    if not mg.device.is_connected():
+        print("\n  [!] Sin dispositivo conectado.")
+        print("      adb connect <IP>:5555")
         return False
 
-    info = adb.get_device_info()
-    print(f"\n  Dispositivo conectado:")
-    print(f"    Modelo:   {info['model']}")
-    print(f"    Android:  {info['android_version']}")
-    print(f"    SDK:      {info['sdk']}")
-    print(f"    Pantalla: {info['resolution']}")
-    print(f"    Densidad: {info['density']}")
-    print("=" * 60)
+    info = mg.device.info()
+    print(f"\n  Dispositivo: {info['model']} (Android {info['android']})")
+    print(f"  Resolucion:  {info['resolution']}")
     return True
 
 
-def show_app_info(nav):
-    """Muestra informacion de la app en pantalla."""
-    print("\n--- Informacion de la App ---")
-
-    info = nav.get_screen_info()
-
-    print(f"  Version:       {info.get('version', 'N/A')}")
-    print(f"  Canal actual:  {info.get('channel', 'N/A')}")
-    print(f"  Elementos UI:  {info.get('total_elements', 0)}")
-    print(f"  Clickeables:   {info.get('clickable_count', 0)}")
-    print(f"  Scrolleables:  {info.get('scrollable_count', 0)}")
-
-    print(f"\n  Textos visibles:")
-    for text in info.get("texts", []):
-        print(f"    - {text}")
-
-
-def scan_categories(nav, session):
-    """Escanea todas las categorias con captura."""
-    print("\n--- Escaneando Categorias ---\n")
-
-    results = session.capture_all_categories(nav, wait=3.0)
-
-    print(f"\n--- Resultados ---")
-    for name, result in results.items():
-        texts = result.get("texts", [])
-        print(f"\n  [{name}]")
-        print(f"    Elementos: {result.get('element_count', '?')}")
-        print(f"    Textos:    {len(texts)}")
-        if texts[:5]:
-            for t in texts[:5]:
-                print(f"      - {t}")
-            if len(texts) > 5:
-                print(f"      ... (+{len(texts)-5} mas)")
-
-    # Guardar log
-    session.save_log()
-    session.export_texts()
-
-    print(f"\n  Archivos guardados en: {session.dumps_dir}")
-    return results
+def cmd_status(mg):
+    """Muestra estado actual de la app."""
+    print("\n--- Estado de MGAndroid ---")
+    try:
+        status = mg.status()
+        print(f"  Running:     {status['running']}")
+        print(f"  On Home:     {status['on_home']}")
+        print(f"  Version:     {status['version']}")
+        print(f"  Canal:       {status['channel']}")
+        print(f"  Velocidad:   {status['speed']}")
+        print(f"  Categorias:  {status['categories']}")
+        print(f"\n  Textos visibles ({len(status['texts'])}):")
+        for t in status['texts']:
+            print(f"    - {t}")
+    except DeviceError as e:
+        print(f"  Error: {e}")
 
 
-def scan_channels(nav, session, count=10):
-    """Escanea canales en vivo."""
-    print(f"\n--- Escaneando {count} Canales en Vivo ---\n")
+def cmd_categories(mg):
+    """Lista y navega categorias."""
+    print("\n--- Categorias ---")
+    cats = mg.categories()
+    for name, node in cats.items():
+        print(f"  {name:12s} -> centro: {node.center}")
+    return cats
 
-    channels = session.capture_channel_list(nav, num_channels=count, wait=2.0)
 
-    print(f"\n--- Canales Encontrados ---")
-    for ch in channels:
-        print(f"  {ch['index']:3d}. {ch['name']}")
+def cmd_crawl(mg, channels_count=10):
+    """Crawl completo."""
+    crawler = Crawler(mg=mg)
+    data = crawler.crawl_all(channels_count=channels_count)
+    crawler.summary()
+    return data
 
-    session.save_log()
-    print(f"\n  Log guardado en: {session.dumps_dir}")
+
+def cmd_channels(mg, count=10):
+    """Lista canales en vivo."""
+    print(f"\n--- Recorriendo {count} canales ---\n")
+    channels = mg.list_channels(count=count)
+    print(f"\n  Total: {len(channels)} canales")
     return channels
 
 
-def full_scan(nav, session):
-    """Escaneo completo: info + categorias + canales."""
-    print("\n" + "=" * 60)
-    print("  ESCANEO COMPLETO")
-    print("=" * 60)
-
-    # 1. Info de la app
-    show_app_info(nav)
-
-    # 2. Captura de home
-    session.capture(label="home")
-
-    # 3. Categorias
-    scan_categories(nav, session)
-
-    # Volver a home para canales
-    nav.go_home()
-    time.sleep(3)
-
-    # 4. Canales (primeros 10)
-    scan_channels(nav, session, count=10)
-
-    # Resumen final
-    print("\n" + "=" * 60)
-    print("  ESCANEO COMPLETADO")
-    print("=" * 60)
-    summary = session.get_summary()
-    print(f"  Sesion:    {summary['session']}")
-    print(f"  Capturas:  {summary['total_captures']}")
-    print(f"  Carpeta:   {summary['dumps_dir']}")
-    print("=" * 60 + "\n")
-
-
-def quick_dump(adb):
-    """Hace un dump rapido de la UI actual y muestra el resumen."""
-    print("\n--- Quick UI Dump ---\n")
-
-    parser = UIParser()
-    adb.dump_ui("/sdcard/ui.xml")
-    adb.pull_file("/sdcard/ui.xml", str(PROJECT_DIR / "dumps" / "quick_dump.xml"))
-
-    parser.parse_file(str(PROJECT_DIR / "dumps" / "quick_dump.xml"))
-    parser.summary()
-
-    print("\n  Arbol de UI (profundidad 3):")
-    parser.print_tree(max_depth=3)
-
-
-def interactive_menu(adb, nav, session):
-    """Menu interactivo para controlar el bot."""
+def interactive_menu(mg):
+    """Menu interactivo."""
     while True:
         print("\n" + "-" * 40)
-        print("  MENU PRINCIPAL")
+        print("  MENU - MGAndroid Driver")
         print("-" * 40)
-        print("  1. Info del dispositivo y app")
-        print("  2. Escanear categorias")
-        print("  3. Escanear canales en vivo")
-        print("  4. Escaneo completo")
-        print("  5. Quick dump (UI actual)")
-        print("  6. Screenshot")
-        print("  7. Navegar a categoria...")
-        print("  8. Tap por texto...")
-        print("  9. Abrir/reiniciar app")
+        print("  1. Estado de la app")
+        print("  2. Abrir app")
+        print("  3. Categorias")
+        print("  4. Ir a categoria...")
+        print("  5. Canales en vivo")
+        print("  6. Historial")
+        print("  7. Favoritos")
+        print("  8. Crawl completo")
+        print("  9. Screenshot")
+        print("  10. Dump UI (arbol)")
+        print("  11. Click por texto...")
+        print("  12. Reiniciar app")
         print("  0. Salir")
         print("-" * 40)
 
         try:
-            choice = input("  Opcion: ").strip()
+            opt = input("  > ").strip()
         except (KeyboardInterrupt, EOFError):
-            print("\n  Saliendo...")
             break
 
         try:
-            if choice == "1":
-                show_app_info(nav)
-
-            elif choice == "2":
-                scan_categories(nav, session)
-
-            elif choice == "3":
-                count = input("  Cantidad de canales [10]: ").strip()
-                count = int(count) if count else 10
-                scan_channels(nav, session, count)
-
-            elif choice == "4":
-                full_scan(nav, session)
-
-            elif choice == "5":
-                quick_dump(adb)
-
-            elif choice == "6":
-                label = input("  Nombre [screenshot]: ").strip() or "screenshot"
-                result = session.screenshot(label=label)
-                print(f"  Guardado: {result['screenshot_path']}")
-
-            elif choice == "7":
-                cats = nav.get_categories()
-                print(f"  Categorias: {list(cats.keys())}")
-                cat = input("  Categoria: ").strip()
-                if cat:
-                    nav.go_to_category(cat)
-                    session.capture(label=f"nav_{cat}")
-                    print(f"  Navegado a: {cat}")
-
-            elif choice == "8":
-                text = input("  Texto del boton: ").strip()
+            if opt == "1":
+                cmd_status(mg)
+            elif opt == "2":
+                mg.open()
+                print("  App abierta.")
+            elif opt == "3":
+                cmd_categories(mg)
+            elif opt == "4":
+                cats = mg.categories()
+                print(f"  Disponibles: {list(cats.keys())}")
+                name = input("  Categoria: ").strip()
+                if name:
+                    mg.device.click_text(name, wait=3.0)
+                    print(f"  Navegado a: {name}")
+            elif opt == "5":
+                n = input("  Cantidad [10]: ").strip()
+                cmd_channels(mg, int(n) if n else 10)
+            elif opt == "6":
+                mg.open_history()
+                print("  Historial abierto.")
+            elif opt == "7":
+                mg.open_favorites()
+                print("  Favoritos abiertos.")
+            elif opt == "8":
+                cmd_crawl(mg)
+            elif opt == "9":
+                mg.screenshot("screenshots/manual_capture.png")
+                print("  Captura guardada.")
+            elif opt == "10":
+                mg.device.refresh()
+                mg.device.tree.print_tree(max_depth=3)
+            elif opt == "11":
+                text = input("  Texto: ").strip()
                 if text:
-                    elem = nav.tap_text(text, exact=False)
-                    print(f"  Tap en: {elem}")
-
-            elif choice == "9":
-                adb.force_stop(PACKAGE)
-                time.sleep(1)
-                adb.start_app(PACKAGE)
-                time.sleep(4)
+                    mg.device.click_text(text)
+                    print(f"  Tap en: {text}")
+            elif opt == "12":
+                mg.restart()
                 print("  App reiniciada.")
-
-            elif choice == "0":
-                print("  Hasta luego!")
+            elif opt == "0":
+                print("  Bye!")
                 break
-
             else:
-                print("  Opcion no valida.")
-
-        except NavigationError as e:
-            print(f"\n  [ERROR NAV] {e}")
-        except ADBError as e:
-            print(f"\n  [ERROR ADB] {e}")
+                print("  Opcion invalida.")
+        except DeviceError as e:
+            print(f"\n  [ERROR] {e}")
         except Exception as e:
             print(f"\n  [ERROR] {e}")
 
 
-# ─── Punto de entrada ─────────────────────────────────────────────────
-
 def main():
     parser = argparse.ArgumentParser(
-        description="Android TV Bot - Automatizacion de MGAndroid",
+        description="MGAndroid Driver - Framework de Automatizacion",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos:
-  python main.py                  Menu interactivo
-  python main.py --scan           Escaneo completo
-  python main.py --categories     Solo categorias
-  python main.py --channels 15    Capturar 15 canales
-  python main.py --info           Mostrar info
-  python main.py --dump           Quick dump de UI
+  python main.py                   Menu interactivo
+  python main.py --crawl           Crawl completo
+  python main.py --categories      Listar categorias
+  python main.py --channels 20     Recorrer 20 canales
+  python main.py --status          Estado actual
+
+Uso como libreria:
+  from mgandroid import MGAndroid
+  mg = MGAndroid()
+  mg.open()
+  mg.go_movies()
         """,
     )
-
-    parser.add_argument(
-        "--scan", action="store_true",
-        help="Escaneo completo automatico"
-    )
-    parser.add_argument(
-        "--categories", action="store_true",
-        help="Escanear todas las categorias"
-    )
-    parser.add_argument(
-        "--channels", type=int, metavar="N",
-        help="Capturar N canales en vivo"
-    )
-    parser.add_argument(
-        "--info", action="store_true",
-        help="Mostrar info del dispositivo y app"
-    )
-    parser.add_argument(
-        "--dump", action="store_true",
-        help="Quick dump de la UI actual"
-    )
-    parser.add_argument(
-        "--device", "-s", type=str, default=None,
-        help="Serial del dispositivo ADB"
-    )
-    parser.add_argument(
-        "--verbose", "-v", action="store_true",
-        help="Logging detallado (DEBUG)"
-    )
+    parser.add_argument("--crawl", action="store_true", help="Crawl completo")
+    parser.add_argument("--categories", action="store_true", help="Listar categorias")
+    parser.add_argument("--channels", type=int, metavar="N", help="Recorrer N canales")
+    parser.add_argument("--status", action="store_true", help="Estado de la app")
+    parser.add_argument("--device", "-s", type=str, help="Serial del dispositivo")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
 
     args = parser.parse_args()
 
-    # Nivel de log
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    # Inicializar ADB
-    adb = ADB(device_serial=args.device)
+    # Inicializar
+    mg = MGAndroid(serial=args.device)
 
-    # Verificar conexion
-    if not check_connection(adb):
+    print_header()
+    if not check_device(mg):
         sys.exit(1)
 
-    # Inicializar navegador y sesion de captura
-    nav = Navigator(adb=adb, dumps_dir=str(PROJECT_DIR / "dumps"))
-    session = CaptureSession(adb=adb, base_dir=str(PROJECT_DIR))
-
-    # Ejecutar segun argumentos
     try:
-        if args.scan:
-            full_scan(nav, session)
-
+        if args.crawl:
+            cmd_crawl(mg)
         elif args.categories:
-            scan_categories(nav, session)
-
+            cmd_categories(mg)
         elif args.channels:
-            scan_channels(nav, session, count=args.channels)
-
-        elif args.info:
-            show_app_info(nav)
-
-        elif args.dump:
-            quick_dump(adb)
-
+            cmd_channels(mg, args.channels)
+        elif args.status:
+            cmd_status(mg)
         else:
-            # Menu interactivo por defecto
-            interactive_menu(adb, nav, session)
-
+            interactive_menu(mg)
     except KeyboardInterrupt:
-        print("\n\n  Interrumpido por el usuario.")
-    except ADBError as e:
-        print(f"\n  [ERROR ADB] {e}")
+        print("\n  Interrumpido.")
+    except DeviceError as e:
+        print(f"\n  [FATAL] {e}")
         sys.exit(1)
-
-    # Guardar log si hay capturas
-    if session.captures_log:
-        session.save_log()
-        print(f"\n  Log guardado: {session.dumps_dir}/session_log.json")
 
 
 if __name__ == "__main__":
