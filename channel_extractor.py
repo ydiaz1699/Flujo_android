@@ -338,16 +338,17 @@ class ChannelExtractor:
         logger.info("  EXTRACCION COMPLETA DE CANALES")
         logger.info("=" * 55)
 
-        # Primero, ir a la seccion de TV en vivo
-        self.mg.go_live(wait=3.0)
-
-        # Abrir el panel de canales (tap en el area de video
-        # o presionar OK que abre program_view)
-        self.device.dpad_center()
-        time.sleep(2)
+        # Abrir el panel de canales
+        if not self._open_channel_panel():
+            logger.error("No se pudo abrir el panel de canales.")
+            return {}
 
         # Extraer menu lateral
         self.extract_menu()
+
+        if not self.menu_items:
+            logger.error("Menu lateral vacio. El panel no se abrio correctamente.")
+            return {}
 
         # Recorrer cada categoria
         categories_to_scan = self.menu_items[:]
@@ -381,12 +382,120 @@ class ChannelExtractor:
 
         return self.categories
 
+    def _open_channel_panel(self, max_attempts=5):
+        """
+        Abre el panel de canales en la seccion VIVO.
+
+        Intenta varias estrategias para abrir el panel:
+        1. Si ya esta en la vista de canales (program_view visible) → listo
+        2. Si esta en home → ir a VIVO
+        3. Presionar OK para abrir panel
+        4. Si no funciona, presionar MENU
+        5. Si no funciona, presionar OK de nuevo
+
+        Returns:
+            True si el panel se abrio correctamente.
+        """
+        logger.info("Abriendo panel de canales...")
+
+        # Verificar si ya estamos en la vista de canales
+        self.device.refresh()
+        if self._is_channel_panel_open():
+            logger.info("Panel de canales ya esta abierto.")
+            return True
+
+        # Verificar si estamos en home (tiene categorias VIVO/SERIE/etc)
+        cats = self.device.tree.get_categories()
+        if cats:
+            logger.info("En home. Navegando a VIVO...")
+            # Click en VIVO para entrar a la seccion de TV en vivo
+            vivo_node = cats.get("VIVO")
+            if vivo_node:
+                self.device.click_node(vivo_node, wait=3.0)
+            else:
+                self.device.click_text("VIVO", wait=3.0)
+
+        # Ahora estamos en la vista del reproductor (fullscreen o con panel)
+        # Intentar abrir el panel de canales
+        for attempt in range(max_attempts):
+            self.device.refresh()
+
+            if self._is_channel_panel_open():
+                logger.info(f"Panel abierto (intento {attempt+1}).")
+                return True
+
+            # Estrategia segun intento
+            if attempt == 0:
+                # Primer intento: presionar OK (suele abrir el panel)
+                logger.info("  Intentando OK...")
+                self.device.dpad_center()
+                time.sleep(2)
+            elif attempt == 1:
+                # Segundo intento: presionar OK de nuevo
+                logger.info("  Intentando OK de nuevo...")
+                self.device.dpad_center()
+                time.sleep(2)
+            elif attempt == 2:
+                # Tercer intento: MENU
+                logger.info("  Intentando MENU...")
+                self.device.menu()
+                time.sleep(2)
+            elif attempt == 3:
+                # Cuarto intento: tap en el centro de la pantalla
+                logger.info("  Intentando tap en centro...")
+                self.device.tap(698, 360)
+                time.sleep(2)
+            else:
+                # Ultimo intento: back y reintentar
+                logger.info("  Intentando BACK + OK...")
+                self.device.back()
+                time.sleep(1)
+                self.device.dpad_center()
+                time.sleep(2)
+
+        # Ultimo check
+        self.device.refresh()
+        return self._is_channel_panel_open()
+
+    def _is_channel_panel_open(self):
+        """
+        Verifica si el panel de canales esta abierto.
+
+        Indicadores:
+        - Existe program_view o ll_program_root
+        - Existe recycler_channel
+        - Hay nodos tv_live_name con x > 300 (canales, no menu)
+        - El arbol tiene mas de 50 nodos (panel abierto vs 20 en fullscreen)
+        """
+        # Check rapido por cantidad de nodos
+        if self.device.tree.node_count < 30:
+            return False
+
+        # Buscar indicadores del panel
+        indicators = [
+            "program_view",
+            "ll_program_root",
+            "recycler_channel",
+            "ll_live_channel",
+        ]
+
+        for indicator in indicators:
+            if self.device.tree.find_id(indicator).first():
+                return True
+
+        # Buscar tv_live_name (presente tanto en menu como en canales)
+        names = self.device.tree.find_id("tv_live_name").all()
+        if len(names) >= 3:
+            return True
+
+        return False
+
     def extract_favorites(self):
         """Extrae solo los canales favoritos."""
         logger.info("Extrayendo favoritos...")
-        self.mg.go_live(wait=3.0)
-        self.device.dpad_center()
-        time.sleep(2)
+        if not self._open_channel_panel():
+            logger.error("No se pudo abrir el panel de canales.")
+            return []
         return self.extract_category("Favorito", max_scrolls=20)
 
     # ─── Consolidacion ────────────────────────────────────────────────
