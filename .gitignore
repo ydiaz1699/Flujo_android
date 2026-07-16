@@ -1,0 +1,14 @@
+# Dumps y screenshots (se generan localmente)
+dumps/session_*
+screenshots/session_*
+
+# Pero mantener las carpetas
+!dumps/.gitkeep
+!screenshots/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
